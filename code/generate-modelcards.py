@@ -4,6 +4,7 @@
 Generative AI Model Cards Generator with Confidence Scoring
 """
 
+
 import json
 import os
 import asyncio
@@ -12,6 +13,8 @@ from typing import Dict, List, Optional, Union
 import logging
 from datetime import datetime
 import backoff
+from tqdm import tqdm
+
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class GenerativeAIModelCardGenerator:
     def __init__(self, api_key: str, max_workers: int = 100):
         self.api_key = api_key
@@ -34,18 +38,22 @@ class GenerativeAIModelCardGenerator:
         self.generative_ai_template = """
 You are an expert in Generative AI model documentation, specializing in creating comprehensive model cards for GENERATIVE AI SYSTEMS.
 
+
 IMPORTANT INSTRUCTIONS:
 1. If you cannot find specific information about any section from the provided data, set content to "Not provided". If a field doesn't apply to this type of model, use "Not applicable". DO NOT make up, invent, or fabricate any information.
 2. For each section, provide a confidence level: "low", "medium", "high", or "certain" based on how confident you are about the information.
 3. Return your response in VALID JSON format with each section containing both "content" and "confidence" fields.
 4. CRITICAL: If the content for any field is "Not provided" or "Not applicable", DO NOT add any additional explanatory text. Just use the exact phrases "Not provided" or "Not applicable" as the content value.
 
+
 Based on the following information:
 - Model ID: {model_id}
 - Tags: {tags}
 - Original Model Card: {original_card}
 
+
 Create a comprehensive Model Card specifically designed for this GENERATIVE AI model and return it as a JSON object with the following structure:
+
 
 {{
   "model_details": {{
@@ -116,15 +124,18 @@ Create a comprehensive Model Card specifically designed for this GENERATIVE AI m
   }}
 }}
 
+
 CONFIDENCE LEVEL GUIDELINES:
 - "certain": Information explicitly and clearly stated in the provided data
 - "high": Information that can be reliably inferred from the provided data with high confidence
 - "medium": Information based on reasonable assumptions from limited available data
 - "low": General recommendations, very uncertain inferences, or when content is "Not provided"/"Not applicable"
 
+
 CONTENT GUIDELINES:
 - "Not provided": Use when specific information should exist but is missing from the source data
 - "Not applicable": Use when a field doesn't apply to this type of model (e.g., video generation capabilities for a text-only model)
+
 
 CRITICAL REMINDERS:
 1. Only use information from the provided data
@@ -136,8 +147,10 @@ CRITICAL REMINDERS:
 7. Ensure all JSON is properly formatted and valid
 8. When content is "Not provided" or "Not applicable", do NOT add any explanatory text beyond these exact phrases
 
+
 Generate a professional, factual model card based strictly on the available information.
 """
+
 
     async def __aenter__(self):
         connector = aiohttp.TCPConnector(limit=500, limit_per_host=100)
@@ -149,34 +162,11 @@ Generate a professional, factual model card based strictly on the available info
         )
         return self
 
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
 
-    def determine_generative_type(self, tags: Union[str, List[str], None], model_id: str) -> str:
-        """Determine generative AI type based on tags and model ID"""
-        if tags is None:
-            tags_str = ""
-        elif isinstance(tags, list):
-            tags_str = " ".join(str(tag) for tag in tags)
-        else:
-            tags_str = str(tags)
-        
-        tags_lower = tags_str.lower()
-        model_id_lower = model_id.lower()
-        
-        if any(term in tags_lower for term in ['multimodal', 'vision-language', 'text-to-image', 'image-to-text']):
-            return 'multimodal'
-        elif any(term in tags_lower for term in ['image-generation', 'diffusion', 'dalle', 'midjourney', 'stable-diffusion']):
-            return 'image-generation'
-        elif any(term in tags_lower for term in ['audio', 'speech', 'music', 'tts', 'text-to-speech']):
-            return 'audio-generation'
-        elif any(term in tags_lower for term in ['video', 'text-to-video', 'video-generation']):
-            return 'video-generation'
-        elif any(term in tags_lower for term in ['code', 'programming', 'coding', 'code-generation']):
-            return 'code-generation'
-        else:
-            return 'text-generation'
 
     def normalize_data_structure(self, data: Dict) -> Dict:
         """Normalize data structure, ensure all fields exist with empty defaults"""
@@ -227,6 +217,7 @@ Generate a professional, factual model card based strictly on the available info
         
         return normalized_data
 
+
     def parse_generated_card(self, generated_text: str) -> Dict:
         """Parse generated model card JSON text"""
         try:
@@ -255,6 +246,7 @@ Generate a professional, factual model card based strictly on the available info
                     }
                 }
 
+
     @backoff.on_exception(
         backoff.expo,
         (aiohttp.ClientError, asyncio.TimeoutError),
@@ -271,12 +263,6 @@ Generate a professional, factual model card based strictly on the available info
         # Get the model_id for logging
         model_id = normalized_data.get('model_id', 'Unknown')
         logger.info(f"Processing model: {model_id}")
-        
-        # Determine generative AI type
-        gen_type = self.determine_generative_type(
-            normalized_data.get('tags'), 
-            model_id
-        )
         
         # Convert tags to string for display
         tags_display = normalized_data.get('tags', [])
@@ -298,7 +284,7 @@ Generate a professional, factual model card based strictly on the available info
             "messages": [
                 {
                     "role": "system", 
-                    "content": f"You are an expert in generative AI documentation, specializing in creating factual model cards for {gen_type} systems. NEVER fabricate information. Always provide confidence levels. Use 'Not provided' for missing information and 'Not applicable' for irrelevant fields. When using 'Not provided' or 'Not applicable', use ONLY these exact phrases without any additional explanation. Return only valid JSON format with content and confidence fields."
+                    "content": "You are an expert in generative AI documentation, specializing in creating factual model cards for generative AI systems. NEVER fabricate information. Always provide confidence levels. Use 'Not provided' for missing information and 'Not applicable' for irrelevant fields. When using 'Not provided' or 'Not applicable', use ONLY these exact phrases without any additional explanation. Return only valid JSON format with content and confidence fields."
                 },
                 {
                     "role": "user",
@@ -350,6 +336,7 @@ Generate a professional, factual model card based strictly on the available info
             }
             return simplified_result
 
+
     def read_and_filter_data(self, file_path: str) -> List[Dict]:
         """Read and filter generative AI data, retain complete original data"""
         logger.info(f"Reading and filtering generative AI models from: {file_path}")
@@ -392,6 +379,7 @@ Generate a professional, factual model card based strictly on the available info
         
         return generative_models
 
+
     async def process_batch_async(self, models_batch: List[Dict]) -> List[Dict]:
         """Async batch processing of models"""
         semaphore = asyncio.Semaphore(self.max_workers)
@@ -419,12 +407,14 @@ Generate a professional, factual model card based strictly on the available info
         
         return processed_results
 
+
     def save_checkpoint(self, results: List[Dict], output_path: str, checkpoint_num: int):
         """Save checkpoint with only essential data"""
         checkpoint_path = f"{output_path}.checkpoint_{checkpoint_num}.json"
         with open(checkpoint_path, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         logger.info(f"Checkpoint saved: {checkpoint_path}")
+
 
     def load_checkpoint(self, output_path: str) -> List[Dict]:
         """Load latest checkpoint"""
@@ -445,8 +435,9 @@ Generate a professional, factual model card based strictly on the available info
             logger.warning(f"Failed to load checkpoint: {e}")
             return []
 
+
     async def process_all_models(self, input_file: str, output_file: str, batch_size: int = 50):
-        """Process all generative AI models"""
+        """Process all generative AI models with progress bar and checkpoint resume"""
         # Read and filter data
         all_models = self.read_and_filter_data(input_file)
         
@@ -460,39 +451,56 @@ Generate a professional, factual model card based strictly on the available info
         remaining_models = [m for m in all_models 
                            if m.get('model_id') not in processed_ids]
         
-        logger.info(f"Total generative AI models: {len(all_models)}, Remaining: {len(remaining_models)}")
+        total_models = len(all_models)
+        processed_count = len(processed_results)
+        
+        logger.info(f"Total generative AI models: {total_models}, Already processed: {processed_count}, Remaining: {len(remaining_models)}")
         
         # 添加调试信息
         if remaining_models:
             logger.info(f"First few remaining models: {[m.get('model_id', 'NO_ID') for m in remaining_models[:3]]}")
         
-        # Group statistics by generation type
-        type_stats = {}
-        for model in remaining_models:
-            gen_type = self.determine_generative_type(model.get('tags'), model.get('model_id', ''))
-            type_stats[gen_type] = type_stats.get(gen_type, 0) + 1
-        
-        logger.info(f"Models by type: {type_stats}")
-        
-        # Process in batches
+        # Process in batches with tqdm progress bar
         checkpoint_interval = 2  # Save checkpoint every 2 batches
         
-        for i in range(0, len(remaining_models), batch_size):
-            batch = remaining_models[i:i+batch_size]
-            batch_num = i // batch_size + 1
+        # Initialize tqdm with total models and already processed count
+        pbar = None
+        try:
+            pbar = tqdm(total=total_models, initial=processed_count, unit="model", 
+                       desc="Processing models", dynamic_ncols=True)
             
-            logger.info(f"Processing batch {batch_num}/{(len(remaining_models) + batch_size - 1) // batch_size}")
-            
-            # Process current batch
-            batch_results = await self.process_batch_async(batch)
-            processed_results.extend(batch_results)
-            
-            # Periodically save checkpoint
-            if batch_num % checkpoint_interval == 0:
-                self.save_checkpoint(processed_results, output_file, batch_num)
-            
-            # Rate limiting
-            await asyncio.sleep(1)
+            for i in range(0, len(remaining_models), batch_size):
+                batch = remaining_models[i:i+batch_size]
+                batch_num = i // batch_size + 1
+                
+                logger.info(f"Processing batch {batch_num}/{(len(remaining_models) + batch_size - 1) // batch_size}")
+                
+                # Process current batch
+                batch_results = await self.process_batch_async(batch)
+                processed_results.extend(batch_results)
+                
+                # Update progress bar
+                pbar.update(len(batch))
+                pbar.set_description(f"Processing batch {batch_num}")
+                
+                # Periodically save checkpoint
+                if batch_num % checkpoint_interval == 0:
+                    self.save_checkpoint(processed_results, output_file, batch_num)
+                
+                # Rate limiting
+                await asyncio.sleep(1)
+                
+        except KeyboardInterrupt:
+            logger.info("Processing interrupted by user. Saving checkpoint...")
+            # Save current progress on interrupt
+            if processed_results:
+                checkpoint_num = len(processed_results) // batch_size + 1
+                self.save_checkpoint(processed_results, output_file, checkpoint_num)
+            raise
+        finally:
+            # Close progress bar properly
+            if pbar is not None:
+                pbar.close()
         
         # Save final results as JSON format with only essential data
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -505,15 +513,12 @@ Generate a professional, factual model card based strictly on the available info
         
         return processed_results
 
+
     def generate_comprehensive_report(self, results: List[Dict], report_path: str):
         """Generate comprehensive report"""
         total = len(results)
         successful = len([r for r in results if r.get('generated_model_card', {}) != {}])
         failed = total - successful
-        
-        # Statistics by model type (从原始数据中获取)
-        type_stats = {}
-        success_by_type = {}
         
         # Analyze confidence distribution
         confidence_stats = {
@@ -583,6 +588,7 @@ Generate a professional, factual model card based strictly on the available info
         logger.info(f"Confidence distribution: {confidence_stats}")
         logger.info(f"Content distribution: {content_stats}")
 
+
 async def main():
     """Main function"""
     API_KEY = os.getenv('OPENAI_API_KEY')
@@ -607,6 +613,7 @@ async def main():
         except Exception as e:
             logger.error(f"Processing failed: {e}")
             raise
+
 
 if __name__ == "__main__":
     asyncio.run(main())
