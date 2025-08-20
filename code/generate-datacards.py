@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Union
 import logging
 from datetime import datetime
 import backoff
+from tqdm.asyncio import tqdm
 
 # Configure logging
 logging.basicConfig(
@@ -172,53 +173,54 @@ CRITICAL REMINDERS:
         if self.session:
             await self.session.close()
 
-    def determine_dataset_type(self, tags: Union[str, List[str], None], dataset_id: str) -> str:
-        """Determine dataset type based on tags and dataset ID"""
-        if tags is None:
-            tags_str = ""
-        elif isinstance(tags, list):
-            tags_str = " ".join(str(tag) for tag in tags)
-        else:
-            tags_str = str(tags)
-        
-        tags_lower = tags_str.lower()
-        dataset_id_lower = dataset_id.lower()
-        
-        if any(term in tags_lower for term in ['multimodal', 'vision-language', 'text-image']):
-            return 'multimodal-dataset'
-        elif any(term in tags_lower for term in ['image', 'visual', 'computer-vision', 'cv']):
-            return 'image-dataset'
-        elif any(term in tags_lower for term in ['audio', 'speech', 'music', 'sound']):
-            return 'audio-dataset'
-        elif any(term in tags_lower for term in ['video', 'temporal', 'sequence']):
-            return 'video-dataset'
-        elif any(term in tags_lower for term in ['code', 'programming', 'software']):
-            return 'code-dataset'
-        elif any(term in tags_lower for term in ['conversation', 'dialogue', 'chat']):
-            return 'conversational-dataset'
-        else:
-            return 'text-dataset'
+    def safe_get(self, data: Union[Dict, str, None], key: str, default=''):
+        """Safely get value from data, handling cases where data might be a string"""
+        if data is None:
+            return default
+        if isinstance(data, dict):
+            return data.get(key, default)
+        if isinstance(data, str):
+            # If data is a string, we can't use .get(), so return default
+            return default
+        return default
 
-    def filter_relevant_data(self, data: Dict) -> Dict:
+    def filter_relevant_data(self, data: Union[Dict, str]) -> Dict:
         """Filter out irrelevant data like RepoSibling and keep only essential fields"""
+        # Handle case where data might be a string
+        if not isinstance(data, dict):
+            logger.warning(f"Expected dict but got {type(data)}: {data}")
+            return {
+                'datasetId': str(data) if data else '',
+                'datasetCard': '',
+                'tags': [],
+                'description': '',
+                'author': '',
+                'likes': 0,
+                'downloads': 0,
+                'lastModified': '',
+                'createdAt': '',
+                'generative_ai_info': {}
+            }
+        
         filtered_data = {
-            'datasetId': data.get('datasetId', ''),
-            'datasetCard': data.get('datasetCard', ''),
-            'tags': data.get('tags', []),
-            'description': data.get('description', ''),
-            'author': data.get('author', ''),
-            'likes': data.get('likes', 0),
-            'downloads': data.get('downloads', 0),
-            'lastModified': data.get('lastModified', ''),
-            'createdAt': data.get('createdAt', ''),
-            'generative_ai_info': data.get('generative_ai_info', {})
+            'datasetId': self.safe_get(data, 'datasetId', ''),
+            'datasetCard': self.safe_get(data, 'datasetCard', ''),
+            'tags': self.safe_get(data, 'tags', []),
+            'description': self.safe_get(data, 'description', ''),
+            'author': self.safe_get(data, 'author', ''),
+            'likes': self.safe_get(data, 'likes', 0),
+            'downloads': self.safe_get(data, 'downloads', 0),
+            'lastModified': self.safe_get(data, 'lastModified', ''),
+            'createdAt': self.safe_get(data, 'createdAt', ''),
+            'generative_ai_info': self.safe_get(data, 'generative_ai_info', {})
         }
         
         # Extract license from metadata if available
-        if 'metadata' in data and 'card_data' in data['metadata']:
-            card_data = data['metadata']['card_data']
-            if 'license' in card_data:
-                filtered_data['license'] = card_data.get('license', '')
+        metadata = self.safe_get(data, 'metadata', {})
+        if isinstance(metadata, dict):
+            card_data = self.safe_get(metadata, 'card_data', {})
+            if isinstance(card_data, dict):
+                filtered_data['license'] = self.safe_get(card_data, 'license', '')
         
         return filtered_data
 
@@ -257,54 +259,48 @@ CRITICAL REMINDERS:
         base=2,
         max_value=60
     )
-    async def generate_data_card(self, dataset_data: Dict) -> Optional[Dict]:
+    async def generate_data_card(self, dataset_data: Union[Dict, str]) -> Optional[Dict]:
         """Generate specialized data card for generative AI datasets"""
         
-        # Filter relevant data only
-        filtered_data = self.filter_relevant_data(dataset_data)
-        
-        # Get the dataset_id for logging
-        dataset_id = filtered_data.get('datasetId', 'Unknown')
-        logger.info(f"Processing dataset: {dataset_id}")
-        
-        # Determine dataset type
-        dataset_type = self.determine_dataset_type(
-            filtered_data.get('tags'), 
-            dataset_id
-        )
-        
-        # Convert tags to string for display
-        tags_display = filtered_data.get('tags', [])
-        if isinstance(tags_display, list):
-            tags_display = ", ".join(str(tag) for tag in tags_display) if tags_display else "No tags available"
-        elif tags_display is None:
-            tags_display = "No tags available"
-        else:
-            tags_display = str(tags_display)
-        
-        prompt = self.generative_ai_data_template.format(
-            dataset_id=dataset_id,
-            tags=tags_display,
-            dataset_card=str(filtered_data.get('datasetCard', '')),
-            description=str(filtered_data.get('description', ''))
-        )
-        
-        payload = {
-            "model": "gpt-5-mini-2025-08-07",
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": f"You are an expert in generative AI dataset documentation. Be concise and factual. When information is missing, simply output 'Not provided'. When irrelevant, simply output 'Not applicable'. Do not elaborate."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_completion_tokens": 8000
-        }
-        
         try:
+            # Filter relevant data only
+            filtered_data = self.filter_relevant_data(dataset_data)
+            
+            # Get the dataset_id for logging
+            dataset_id = filtered_data.get('datasetId', 'Unknown')
+            logger.info(f"Processing dataset: {dataset_id}")
+            
+            # Convert tags to string for display
+            tags_display = filtered_data.get('tags', [])
+            if isinstance(tags_display, list):
+                tags_display = ", ".join(str(tag) for tag in tags_display) if tags_display else "No tags available"
+            elif tags_display is None:
+                tags_display = "No tags available"
+            else:
+                tags_display = str(tags_display)
+            
+            prompt = self.generative_ai_data_template.format(
+                dataset_id=dataset_id,
+                tags=tags_display,
+                dataset_card=str(filtered_data.get('datasetCard', '')),
+                description=str(filtered_data.get('description', ''))
+            )
+            
+            payload = {
+                "model": "gpt-5-mini-2025-08-07",  # 修改为有效的模型名称
+                "messages": [
+                    {
+                        "role": "system", 
+                        "content": f"You are an expert in generative AI dataset documentation. Be concise and factual. When information is missing, simply output 'Not provided'. When irrelevant, simply output 'Not applicable'. Do not elaborate."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "max_completion_tokens": 8000
+            }
+            
             async with self.session.post(
                 "https://api.openai.com/v1/chat/completions",
                 json=payload
@@ -336,6 +332,15 @@ CRITICAL REMINDERS:
                     }
                     
         except Exception as e:
+            dataset_id = 'Unknown'
+            try:
+                if isinstance(dataset_data, dict):
+                    dataset_id = dataset_data.get('datasetId', 'Unknown')
+                elif isinstance(dataset_data, str):
+                    dataset_id = dataset_data
+            except:
+                pass
+            
             logger.error(f"Exception generating card for {dataset_id}: {e}")
             
             return {
@@ -356,12 +361,21 @@ CRITICAL REMINDERS:
                     try:
                         data = json.loads(line.strip())
                         
+                        # Type check: ensure data is a dictionary
+                        if not isinstance(data, dict):
+                            logger.warning(f"Line {line_num}: Expected dict but got {type(data)}")
+                            continue
+                        
                         # Only process datasets marked as generative AI
-                        if data.get('generative_ai_info', {}).get('is_generative_ai', False):
+                        generative_ai_info = self.safe_get(data, 'generative_ai_info', {})
+                        if isinstance(generative_ai_info, dict) and generative_ai_info.get('is_generative_ai', False):
                             generative_datasets.append(data)
                             
                     except json.JSONDecodeError as e:
                         logger.warning(f"JSON decode error at line {line_num}: {e}")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Error processing line {line_num}: {e}")
                         continue
                         
         except FileNotFoundError:
@@ -371,10 +385,17 @@ CRITICAL REMINDERS:
         logger.info(f"Found {len(generative_datasets)} generative AI datasets")
         
         # Sort by popularity (downloads + likes)
-        generative_datasets.sort(
-            key=lambda x: x.get('downloads', 0) + x.get('likes', 0), 
-            reverse=True
-        )
+        def get_popularity(x):
+            try:
+                downloads = self.safe_get(x, 'downloads', 0)
+                likes = self.safe_get(x, 'likes', 0)
+                downloads = int(downloads) if isinstance(downloads, (int, str)) and str(downloads).isdigit() else 0
+                likes = int(likes) if isinstance(likes, (int, str)) and str(likes).isdigit() else 0
+                return downloads + likes
+            except:
+                return 0
+        
+        generative_datasets.sort(key=get_popularity, reverse=True)
         
         return generative_datasets
 
@@ -392,7 +413,16 @@ CRITICAL REMINDERS:
         processed_results = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                dataset_id = datasets_batch[i].get('datasetId', 'Unknown')
+                dataset_id = 'Unknown'
+                try:
+                    dataset_data = datasets_batch[i]
+                    if isinstance(dataset_data, dict):
+                        dataset_id = dataset_data.get('datasetId', 'Unknown')
+                    elif isinstance(dataset_data, str):
+                        dataset_id = dataset_data
+                except:
+                    pass
+                
                 logger.error(f"Task failed for {dataset_id}: {result}")
                 processed_results.append({
                     'datasetId': dataset_id,
@@ -432,40 +462,59 @@ CRITICAL REMINDERS:
             return []
 
     async def process_all_datasets(self, input_file: str, output_file: str, batch_size: int = 50):
-        """Process all generative AI datasets"""
+        """Process all generative AI datasets with tqdm progress bar and checkpoint resume"""
         # Read and filter data
         all_datasets = self.read_and_filter_data(input_file)
         
         # Check checkpoint
         processed_results = self.load_checkpoint(output_file)
-        processed_ids = {r.get('datasetId') for r in processed_results 
-                        if r.get('datasetId') is not None and r.get('datasetId') != ''}
+        processed_ids = set()
+        for r in processed_results:
+            if isinstance(r, dict) and r.get('datasetId') is not None and r.get('datasetId') != '':
+                processed_ids.add(r.get('datasetId'))
         
         # Filter already processed datasets
-        remaining_datasets = [d for d in all_datasets 
-                             if d.get('datasetId') not in processed_ids]
+        remaining_datasets = []
+        for d in all_datasets:
+            if isinstance(d, dict) and d.get('datasetId') not in processed_ids:
+                remaining_datasets.append(d)
         
         logger.info(f"Total generative AI datasets: {len(all_datasets)}, Remaining: {len(remaining_datasets)}")
         
-        # Process in batches
-        checkpoint_interval = 5  # Save checkpoint every 5 batches
+        if not remaining_datasets:
+            logger.info("All datasets have been processed. No remaining work.")
+            return processed_results
         
-        for i in range(0, len(remaining_datasets), batch_size):
-            batch = remaining_datasets[i:i+batch_size]
-            batch_num = i // batch_size + 1
-            
-            logger.info(f"Processing batch {batch_num}/{(len(remaining_datasets) + batch_size - 1) // batch_size}")
-            
-            # Process current batch
-            batch_results = await self.process_batch_async(batch)
-            processed_results.extend(batch_results)
-            
-            # Periodically save checkpoint
-            if batch_num % checkpoint_interval == 0:
-                self.save_checkpoint(processed_results, output_file, batch_num)
-            
-            # Rate limiting
-            await asyncio.sleep(1)
+        # Process in batches with tqdm
+        checkpoint_interval = 5  # Save checkpoint every 5 batches
+        total_batches = (len(remaining_datasets) + batch_size - 1) // batch_size
+        
+        try:
+            with tqdm(total=total_batches, desc="Processing batches", unit="batch") as pbar:
+                for i in range(0, len(remaining_datasets), batch_size):
+                    batch = remaining_datasets[i:i+batch_size]
+                    batch_num = i // batch_size + 1
+                    
+                    logger.info(f"Processing batch {batch_num}/{total_batches}")
+                    
+                    # Process current batch
+                    batch_results = await self.process_batch_async(batch)
+                    processed_results.extend(batch_results)
+                    
+                    # Update progress bar
+                    pbar.update(1)
+                    
+                    # Periodically save checkpoint
+                    if batch_num % checkpoint_interval == 0:
+                        self.save_checkpoint(processed_results, output_file, batch_num)
+                    
+                    # Rate limiting
+                    await asyncio.sleep(1)
+                    
+        except KeyboardInterrupt:
+            logger.info("Processing interrupted by user. Saving current progress...")
+            self.save_checkpoint(processed_results, output_file, batch_num)
+            raise
         
         # Save final results - only dataset ID and generated cards
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -481,7 +530,7 @@ CRITICAL REMINDERS:
     def generate_summary_report(self, results: List[Dict], report_path: str):
         """Generate summary report"""
         total = len(results)
-        successful = len([r for r in results if r.get('generation_status') == 'success'])
+        successful = len([r for r in results if isinstance(r, dict) and r.get('generation_status') == 'success'])
         failed = total - successful
         
         report = {
@@ -494,10 +543,10 @@ CRITICAL REMINDERS:
             },
             'failed_datasets': [
                 {
-                    'datasetId': r.get('datasetId', 'unknown'), 
-                    'error': r.get('generation_error', 'unknown')
+                    'datasetId': r.get('datasetId', 'unknown') if isinstance(r, dict) else 'unknown', 
+                    'error': r.get('generation_error', 'unknown') if isinstance(r, dict) else 'unknown'
                 } 
-                for r in results if r.get('generation_status') == 'failed'
+                for r in results if isinstance(r, dict) and r.get('generation_status') == 'failed'
             ]
         }
         
